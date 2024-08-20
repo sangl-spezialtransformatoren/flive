@@ -18,6 +18,7 @@ HEARTBEAT_PERIOD = 1
 
 
 class AbstractBackend(abc.ABC):
+    id: UUID
     log_streamer: FliveStreamer
     stream_task: Optional[asyncio.Task]
     heartbeat_task: Optional[asyncio.Task]
@@ -66,32 +67,29 @@ class AbstractBackend(abc.ABC):
     async def cleanup(self): ...
 
     @abc.abstractmethod
-    async def flow_acquire_lock(self, flow_id: UUID):
-        """Create a lock for working on a flow. This ensures, there is no duplicate execution."""
-        ...
-
-    @abc.abstractmethod
-    async def flow_release_lock(self, flow_id: UUID):
-        """Create a lock for working on a flow. This ensures, there is no duplicate execution."""
-        ...
-
-    @abc.abstractmethod
-    async def flow_get_cached_result(
-        self, flow_key: str, parent_flow_id: UUID, parameters: SerializedParams
-    ): ...
-
-    @abc.abstractmethod
     async def flow_dispatch(
         self,
         flow_id: UUID,
         key: str,
         parameters: SerializedParams,
-        scheduled: bool = False,
         retries: int = 0,
-        parent_flow_id: UUID = None,
-    ):
-        """Dispatches a flow."""
-        ...
+        parent_flow_id: Optional[UUID] = None,
+        scheduled: bool = False,
+    ): ...
+
+    @abc.abstractmethod
+    async def flow_start_work(self, flow_id: UUID): ...
+
+    @abc.abstractmethod
+    async def flow_complete(self, flow_id: UUID, result: JSON): ...
+
+    @abc.abstractmethod
+    async def flow_fail(self, flow_id: UUID, e: Exception): ...
+
+    @abc.abstractmethod
+    async def flow_get_cached_result(
+        self, flow_key: str, parent_flow_id: UUID, parameters: SerializedParams
+    ) -> JSON: ...
 
     @abc.abstractmethod
     async def flow_acquire_one(
@@ -99,23 +97,6 @@ class AbstractBackend(abc.ABC):
     ) -> tuple[str, UUID, SerializedParams]: ...
 
     @abc.abstractmethod
-    async def flow_start_work(self, flow_id: UUID):
-        """Indicates, that a worker started working on the flow"""
-        ...
-
-    @abc.abstractmethod
-    async def flow_complete(self, flow_id: UUID, result: JSON):
-        """Completes a flow. Status and result have to be updated, the flow must be removed from the heartbeat set."""
-        ...
-
-    @abc.abstractmethod
-    async def flow_fail(self, flow_id: UUID, exception: Exception):
-        """Marks a flow as failed. Status has to be updated, the flow must be removed from the heartbeat set and added to a failed set in one transcation."""
-        ...
-
-    @abc.abstractmethod
     async def write_flow_logs(
         self, items: tuple[Literal["stdout", "stderr"], UUID, datetime, str]
-    ):
-        """Write to the log stream of the flow."""
-        ...
+    ): ...

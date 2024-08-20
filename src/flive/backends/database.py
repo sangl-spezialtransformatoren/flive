@@ -83,9 +83,11 @@ acquire_retry = tenacity_retry(
 
 # Parameter hashing
 def dict_hash(params: SerializedParams) -> str:
+    # Convert parameters to a sorted, compact JSON string
     json_string = json.dumps(
         params, sort_keys=True, ensure_ascii=True, separators=(",", ":")
     )
+    # Generate a hash of the JSON string
     return xxhash.xxh3_64_hexdigest(json_string)
 
 
@@ -170,10 +172,12 @@ class DatabaseBackend(AbstractBackend):
         self.session = async_sessionmaker(engine, expire_on_commit=False)
 
     def settings_cte(self):
+        # Create a Common Table Expression (CTE) for settings
         return select(Settings).limit(1).cte("settings")
 
     async def register(self):
         async with self.session() as session:
+            # Register this orchestrator in the database
             await session.execute(
                 insert(Orchestrator).values(
                     id=self.id, last_seen_at=datetime.now(tz=UTC)
@@ -184,6 +188,7 @@ class DatabaseBackend(AbstractBackend):
     @retry
     async def heartbeat(self):
         async with self.session() as session:
+            # Update the last_seen_at timestamp for this orchestrator
             await session.execute(
                 update(Orchestrator)
                 .where(Orchestrator.id == self.id)
@@ -201,6 +206,7 @@ class DatabaseBackend(AbstractBackend):
             if existing_lock:
                 raise RuntimeError("Flow already locked")
 
+            # Create a new flow assignment (lock)
             association = FlowAssignment(flow_id=flow_id, orchestrator_id=self.id)
             session.add(association)
             await session.commit()
@@ -208,6 +214,7 @@ class DatabaseBackend(AbstractBackend):
     @retry
     async def flow_release_lock(self, flow_id: UUID):
         async with self.session() as session:
+            # Remove the flow assignment (release the lock)
             await session.execute(
                 delete(FlowAssignment).where(FlowAssignment.flow_id == flow_id)
             )
@@ -226,6 +233,7 @@ class DatabaseBackend(AbstractBackend):
         parameter_hash = dict_hash(parameters)
         try:
             async with self.session() as session:
+                # Create a new flow
                 flow = Flow(
                     id=flow_id,
                     key=key,
@@ -237,6 +245,7 @@ class DatabaseBackend(AbstractBackend):
                 )
                 session.add(flow)
 
+                # Add a flow history event
                 event = FlowHistory(
                     flow_id=flow_id, event="SCHEDULED" if scheduled else "DISPATCHED"
                 )
@@ -248,11 +257,11 @@ class DatabaseBackend(AbstractBackend):
     @retry
     async def flow_start_work(self, flow_id: UUID):
         async with self.session() as session:
-            # Write event
+            # Add a "STARTED" event to flow history
             event = FlowHistory(flow_id=flow_id, event="STARTED")
             session.add(event)
 
-            # Update values
+            # Update the flow state to "RUNNING"
             await session.execute(
                 update(Flow).where(Flow.id == flow_id).values(state="RUNNING")
             )
@@ -267,11 +276,11 @@ class DatabaseBackend(AbstractBackend):
             flow.state = "COMPLETED"
             flow.result = result
 
-            # Add event
+            # Add a "COMPLETED" event to flow history
             event = FlowHistory(flow_id=flow_id, event="COMPLETED")
             session.add(event)
 
-            # Release lock
+            # Release the flow assignment (lock)
             await session.execute(
                 delete(FlowAssignment).where(FlowAssignment.flow_id == flow_id)
             )
@@ -284,24 +293,24 @@ class DatabaseBackend(AbstractBackend):
             flow = await session.get(Flow, flow_id, with_for_update=True)
             parent_id = flow.parent_flow_id
 
-            # Flow failed finally, if the maximum number of retries is reached
+            # Determine if the flow has failed finally or can be retried
             failed_finally = flow.retries >= flow.maximum_retries
             flow.state = "FINALLY_FAILED" if failed_finally else "FAILED"
 
-            # Add event
+            # Add appropriate event to flow history
             event = FlowHistory(
                 flow_id=flow_id, event="FINALLY_FAILED" if failed_finally else "FAILED"
             )
             session.add(event)
 
-            # Remove assignment
+            # Remove the flow assignment (lock)
             await session.execute(
                 delete(FlowAssignment).where(FlowAssignment.flow_id == flow_id)
             )
 
             await session.commit()
 
-        # Raise the exception only when there is a parent task that can handle the exception.
+        # Raise the exception only when there is a parent task that can handle the exception
         if failed_finally and parent_id:
             raise e
 
@@ -309,7 +318,7 @@ class DatabaseBackend(AbstractBackend):
     async def flow_get_cached_result(
         self, flow_key: Hash, parent_flow_id: UUID, parameters: SerializedParams
     ) -> JSON:
-        # If the subflow has run before, we can identify it by key, parent flow id, parameter hash and state.
+        # If the subflow has run before, we can identify it by key, parent flow id, parameter hash and state
         parameter_hash = dict_hash(parameters)
         stmt = (
             select(Flow)
@@ -408,7 +417,7 @@ class DatabaseBackend(AbstractBackend):
             for event in events:
                 session.add(event)
 
-            # Lock flow
+            # Lock flow by creating a new flow assignment
             assignment = FlowAssignment(flow_id=flow.id, orchestrator_id=self.id)
             session.add(assignment)
 
@@ -425,6 +434,7 @@ class DatabaseBackend(AbstractBackend):
         self, items: tuple[Literal["stdout", "stderr"], UUID, datetime, str]
     ):
         async with self.session() as session:
+            # Bulk insert flow logs
             await session.execute(
                 insert(FlowLogs),
                 [
@@ -445,6 +455,7 @@ class DatabaseBackend(AbstractBackend):
         async with self.session() as session:
             settings_cte = self.settings_cte()
 
+            # Remove orchestrators that haven't been seen recently and have no assigned flows
             await session.execute(
                 delete(Orchestrator).where(
                     Orchestrator.last_seen_at
