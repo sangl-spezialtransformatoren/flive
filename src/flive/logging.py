@@ -5,8 +5,6 @@ from datetime import datetime
 from io import TextIOBase
 from queue import Queue
 
-from flive.backends.common import get_current_backend
-
 
 class MultiOutputStream(TextIOBase):
     def __init__(self, *streams):
@@ -82,7 +80,9 @@ class FliveStreamer:
         return FliveStdErr(self)
 
     async def work(self):
-        backend = get_current_backend()
+        from flive.orchestrator import get_current_orchestrator
+
+        orchestrator = get_current_orchestrator()
         BATCH_SIZE = 1000
 
         while True:
@@ -99,6 +99,6 @@ class FliveStreamer:
                         self.queue.get_nowait()
                         for _ in range(0, min(self.queue.qsize(), BATCH_SIZE))
                     ]
-                await backend.write_flow_logs(items)
+                await orchestrator.write_flow_logs(items)
             except CancelledError:
                 break

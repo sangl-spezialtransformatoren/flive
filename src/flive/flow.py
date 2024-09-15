@@ -1,24 +1,22 @@
-import asyncio
 import logging
-from contextlib import AsyncExitStack
+import warnings
 from contextvars import ContextVar
 from typing import Any
 from typing import Awaitable
 from typing import Callable
+from typing import ClassVar
 from typing import Generic
 from typing import Optional
 from uuid import UUID
 
 from uuid_utils import uuid7
 
-from flive.backends.common import get_current_backend
-from flive.orchestrator import Orchestrator
-from flive.orchestrator import get_active_orchestrator
-from flive.serialize.pydantic import SerializedParams
-from flive.serialize.pydantic import pydantic_deserialize_parameters
-from flive.serialize.pydantic import pydantic_deserialize_result
-from flive.serialize.pydantic import pydantic_serialize_parameters
-from flive.serialize.pydantic import pydantic_serialize_result
+from flive.orchestrator import get_current_orchestrator
+from flive.serialize import SerializedParams
+from flive.serialize import deserialize_parameters
+from flive.serialize import deserialize_result
+from flive.serialize import serialize_parameters
+from flive.serialize import serialize_result
 from flive.types import JSON
 from flive.types import FlowFunction
 from flive.types import NoCacheHit
@@ -31,37 +29,43 @@ current_flow: ContextVar[UUID | None] = ContextVar("current_flow", default=None)
 class Flow(Generic[Params, Result]):
     key: str
     _func: FlowFunction
+    _flows: ClassVar[dict[str, "Flow"]] = {}
 
     def __init__(
         self, func: Callable[Params, Awaitable[Result]], key: str, retries: int
     ):
+        if key in self._flows:
+            raise ValueError(f"Flow key '{key}' is already in use")
         self._func = func
         self.key = key
         self.retries = retries
 
+        # Register the flow
+        Flow._flows[key] = self
+
     def serialize_parameters(
         self, *args: Params.args, **kwargs: Params.kwargs
     ) -> SerializedParams:
-        return pydantic_serialize_parameters(self._func, *args, **kwargs)
+        return serialize_parameters(self._func, *args, **kwargs)
 
     def deserialize_parameters(
         self, serialized_parameters: SerializedParams
     ) -> tuple[list[Any], dict[str, Any]]:  # Correct typing not possible yet
-        return pydantic_deserialize_parameters(self._func, serialized_parameters)
+        return deserialize_parameters(self._func, serialized_parameters)
 
     def serialize_result(self, value: Result) -> JSON:
-        return pydantic_serialize_result(self._func, value)
+        return serialize_result(self._func, value)
 
     def deserialize_result(self, value: JSON) -> Result:
-        return pydantic_deserialize_result(self._func, value)
+        return deserialize_result(self._func, value)
 
     async def execute_work(
         self, flow_id: UUID, *args: Params.args, **kwargs: Params.kwargs
     ) -> Result:
-        backend = get_current_backend()
+        orchestrator = get_current_orchestrator()
 
         # Mark, that we picked up the work
-        await backend.flow_start_work(flow_id=flow_id)
+        await orchestrator.flow_start_work(flow_id=flow_id)
 
         result = None
         exception = None
@@ -71,17 +75,24 @@ class Flow(Generic[Params, Result]):
         except Exception as e:
             exception = e
             logging.exception("Flow failed with exception", exc_info=exception)
-            await asyncio.sleep(2)
         finally:
             current_flow.reset(token)
 
         # Get result
         if not exception:
             # Write result and delete flow from active flows
-            await backend.flow_complete(flow_id, self.serialize_result(result))
+            await orchestrator.flow_complete(flow_id, self.serialize_result(result))
             return result
 
-        await backend.flow_fail(flow_id, exception)
+        failure_info = await orchestrator.flow_fail(flow_id)
+
+        if failure_info.retries_left:
+            # Retry the flow
+            return await self.execute_work(flow_id, *args, **kwargs)
+
+        elif failure_info.has_parent_flow:
+            # If there is a parent flow, that has to handle the exception
+            raise exception
 
     async def execute_work_json(self, flow_id: UUID, parameters: SerializedParams):
         """Executes a task with params from a SerializedParams object."""
@@ -93,20 +104,24 @@ class Flow(Generic[Params, Result]):
         *args: Params.args,
         **kwargs: Params.kwargs,
     ) -> Result:
-        # Obtain active backend
-        backend = get_current_backend()
+        # Obtain active orchestrator
+        orchestrator = get_current_orchestrator()
 
-        # Just exectue the function if no backend is set up.
-        if not backend:
+        # Just execute the function if no orchestrator is set up.
+        if not orchestrator:
+            warnings.warn(
+                "No orchestrator is set up. Executing function directly without flow management.",
+                RuntimeWarning,
+            )
             return await self._func(*args, **kwargs)
 
         # Serialize parameters
         parameters = self.serialize_parameters(*args, **kwargs)
 
-        # Try to return a cached result from the backend
+        # Try to return a cached result from the orchestrator
         if (parent_flow_id := current_flow.get()) is not None:
             try:
-                serialized_result = await backend.flow_get_cached_result(
+                serialized_result = await orchestrator.flow_get_cached_result(
                     flow_key=self.key,
                     parent_flow_id=parent_flow_id,
                     parameters=parameters,
@@ -115,35 +130,22 @@ class Flow(Generic[Params, Result]):
             except NoCacheHit:
                 pass
 
-        # TODO: Mark running instances of the same flow with same parent and parameters
-        # with "operator died" and transfer the retries of them to the new flow
-
         # If there is no cached result, create a new flow
         # Create a unique id
         flow_id = uuid7()
 
-        async with AsyncExitStack() as stack:
-            # If there's no running orchestrator, create one on the fly and enter its context.
-            orchestrator = get_active_orchestrator()
-            if not orchestrator:
-                orchestrator = Orchestrator(flows=[self])
-                await stack.enter_async_context(orchestrator)
+        # Dispatch and acquire the flow in the orchestrator
+        await orchestrator.flow_dispatch_and_acquire(
+            flow_id=flow_id,
+            key=self.key,
+            parameters=parameters,
+            retries=self.retries,
+            parent_flow_id=current_flow.get(),
+        )
 
-            # Dispatch the flow to the backend
-            await backend.flow_dispatch(
-                flow_id=flow_id,
-                key=self.key,
-                parameters=parameters,
-                scheduled=True,
-                retries=self.retries,
-                parent_flow_id=current_flow.get(),
-            )
+        return await self.execute_work(flow_id, *args, **kwargs)
 
-            # Acquire lock so no other worker can start the flow
-            await backend.flow_acquire_lock(flow_id)
-            return await self.execute_work(flow_id, *args, **kwargs)
-
-    async def delay(
+    async def dispatch(
         self,
         *args: Params.args,
         **kwargs: Params.kwargs,
@@ -151,16 +153,16 @@ class Flow(Generic[Params, Result]):
         # Create a unique id
         flow_id = uuid7()
 
-        # Obtain active backend
-        backend = get_current_backend()
+        # Obtain active orchestrator
+        orchestrator = get_current_orchestrator()
 
-        # If there is no backend, we can't schedule the flow
-        if not backend:
-            raise RuntimeError("No backend is set up.")
+        # If there is no orchestrator, we can't schedule the flow
+        if not orchestrator:
+            raise RuntimeError("No orchestrator is set up.")
 
         parameters = self.serialize_parameters(*args, **kwargs)
 
-        await backend.flow_dispatch(
+        await orchestrator.flow_dispatch(
             flow_id=flow_id,
             key=self.key,
             parameters=parameters,

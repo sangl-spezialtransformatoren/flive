@@ -1,44 +1,58 @@
 import asyncio
+import os
+import random
+from datetime import timedelta
 
 from aiorun import run
+from sqlalchemy import insert
+from sqlalchemy.ext.asyncio import create_async_engine
 
+from flive import FliveOrchestrator
 from flive import flow
-from flive.backends.database import DatabaseBackend
+from flive.orchestrator import BaseModel
+from flive.orchestrator import SettingsModel
 
-connection_string = (
-    "postgresql+asyncpg://postgres:mysecretpassword@localhost:5432/flive"
-)
-
-
-@flow(key="task1")
-async def task1():
-    print("Task 1")
-    await asyncio.sleep(1)
+connection_string = "sqlite+aiosqlite:///flive.db"
 
 
-@flow(key="task2")
-async def task2() -> int:
-    print("Task 2")
-    await asyncio.sleep(30)
-    return 1
+async def setup_database():
+    # Delete the existing database file if it exists
+    if os.path.exists("flive.db"):
+        os.remove("flive.db")
+
+    engine = create_async_engine(connection_string)
+    async with engine.begin() as conn:
+        await conn.run_sync(BaseModel.metadata.create_all)
+        await conn.execute(
+            insert(SettingsModel).values(
+                id=0,
+                heartbeat_interval=timedelta(seconds=30),
+                orchestrator_dead_after=timedelta(minutes=3),
+            )
+        )
 
 
-@flow(key="my_flow")
-async def my_flow():
-    print("Starting my flow")
-    await asyncio.sleep(10)
-    print("Result of task 1", await task1())
-    print("Result of task 2", await task2())
-    print("Finished!")
+@flow(key="simple_task", retries=3)
+async def simple_task(name: str) -> str:
+    await asyncio.sleep(2)  # Simulate some work
+    if random.random() < 0.5:  # 50% chance of failure
+        raise Exception("Random failure in simple_task")
+    return f"Hello, {name}!"
 
 
-async def main():
-    backend = DatabaseBackend(connection_string)
-    backend.activate()
-    result = await my_flow.delay()
-    print(result)
-    asyncio.get_event_loop().stop()
+@flow(key="main_flow")
+async def main_flow():
+    try:
+        result = await simple_task("World")
+        print("!", result)
+    except Exception as e:
+        print(f"Main flow caught an exception: {e}")
+
+
+async def run_flow():
+    orchestrator = FliveOrchestrator(connection_string)
+    await orchestrator.run()
 
 
 if __name__ == "__main__":
-    run(main())
+    run(run_flow())

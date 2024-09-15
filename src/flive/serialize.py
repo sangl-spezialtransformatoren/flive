@@ -19,7 +19,7 @@ class SerializedParams(TypedDict):
     kwargs: dict[str, JSON]
 
 
-def pydantic_serialize_parameters(
+def serialize_parameters(
     method: Callable[Params, Any], *args: Params.args, **kwargs: Params.kwargs
 ) -> SerializedParams:
     # Step 1: Inspect the method signature
@@ -55,7 +55,7 @@ def pydantic_serialize_parameters(
     return {"args": serialized_args, "kwargs": serialized_kwargs}
 
 
-def pydantic_deserialize_parameters(
+def deserialize_parameters(
     method: Callable[Params, Any], serialized_params: SerializedParams
 ) -> tuple[list[Any], dict[str, Any]]:
     # Currently there's no way to type the return type correctly.
@@ -101,7 +101,7 @@ def pydantic_deserialize_parameters(
     return deserialized_args, deserialized_kwargs
 
 
-def pydantic_serialize_result(method: Callable[..., Result], value: Result) -> JSON:
+def serialize_result(method: Callable[..., Result], value: Result) -> JSON:
     # Step 1: Inspect the method signature
     sig = signature(method)
     return_annotation = sig.return_annotation
@@ -122,7 +122,7 @@ def pydantic_serialize_result(method: Callable[..., Result], value: Result) -> J
     return serialized_value
 
 
-def pydantic_deserialize_result(method: Callable[..., Result], value: JSON) -> Result:
+def deserialize_result(method: Callable[..., Result], value: JSON) -> Result:
     # Step 1: Inspect the method signature
     sig = signature(method)
     return_annotation = sig.return_annotation
