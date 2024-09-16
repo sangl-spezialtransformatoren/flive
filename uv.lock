@@ -52,6 +52,15 @@ wheels = [
 ]
 
 [[package]]
+name = "colorama"
+version = "0.4.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335 },
+]
+
+[[package]]
 name = "flive"
 version = "0.1.0"
 source = { editable = "." }
@@ -60,6 +69,7 @@ dependencies = [
     { name = "aiosqlite" },
     { name = "asyncpg" },
     { name = "libcst" },
+    { name = "loguru" },
     { name = "pydantic" },
     { name = "redis" },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -75,6 +85,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "libcst", specifier = ">=1.4.0" },
+    { name = "loguru", specifier = ">=0.7.2" },
     { name = "pydantic", specifier = ">=2.8.2" },
     { name = "redis", specifier = ">=5.0.8" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.31" },
@@ -125,6 +136,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/11/38/30206bbcf31425f6fd01dae3cf23e35df790969243d39757ae743d8e6d67/libcst-1.4.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:5da9d7dc83801aba3b8d911f82dc1a375db0d508318bad79d9fb245374afe068", size = 2248523 },
     { url = "https://files.pythonhosted.org/packages/8c/02/1c9c908724c732f09b11493ee5d61893060ecc9a3dc4bc80032d1be87b37/libcst-1.4.0-cp312-cp312-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:7c54aa66c86d8ece9c93156a2cf5ca512b0dce40142fe9e072c86af2bf892411", size = 2326040 },
     { url = "https://files.pythonhosted.org/packages/04/32/7345f10a2dc728015920d689d5c1b8dc0232db321e172cdad2611e73c5b3/libcst-1.4.0-cp312-cp312-win_amd64.whl", hash = "sha256:62e2682ee1567b6a89c91853865372bf34f178bfd237853d84df2b87b446e654", size = 2026263 },
+]
+
+[[package]]
+name = "loguru"
+version = "0.7.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "win32-setctime", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9e/30/d87a423766b24db416a46e9335b9602b054a72b96a88a241f2b09b560fa8/loguru-0.7.2.tar.gz", hash = "sha256:e671a53522515f34fd406340ee968cb9ecafbc4b36c679da03c18fd8d0bd51ac", size = 145103 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/03/0a/4f6fed21aa246c6b49b561ca55facacc2a44b87d65b8b92362a8e99ba202/loguru-0.7.2-py3-none-any.whl", hash = "sha256:003d71e3d3ed35f0f8984898359d65b79e5b21943f78af86aa5491210429b8eb", size = 62549 },
 ]
 
 [[package]]
@@ -272,6 +296,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f9/8e/d18df3626ebe2dbec87c2a3da311d977da4587edecf6e2e9e2d5a61c32bb/uuid_utils-0.9.0-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:22cae83bc486a6c12b38239eb0546f2f81c81c34fcf833f84c2c7cd0cab1ad8f", size = 497834 },
     { url = "https://files.pythonhosted.org/packages/26/4f/d685bd6f42441b2e2f1825b7622d1000e27168a4674f79a56d4ee82ffc78/uuid_utils-0.9.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:c9513399045169435563c284caba0f1802748b02f27c95769426b7a00ed246e1", size = 480511 },
     { url = "https://files.pythonhosted.org/packages/67/0e/0f93711bc07219db095ea91a2c8b683465256ca80a22ee38a74b6a88808b/uuid_utils-0.9.0-cp312-none-win_amd64.whl", hash = "sha256:284e6d24ba659d003bd47fcfc404d374c7807983407d4d61f26c80a3b7f4cb41", size = 170696 },
+]
+
+[[package]]
+name = "win32-setctime"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6b/dd/f95a13d2b235a28d613ba23ebad55191514550debb968b46aab99f2e3a30/win32_setctime-1.1.0.tar.gz", hash = "sha256:15cf5750465118d6929ae4de4eb46e8edae9a5634350c01ba582df868e932cb2", size = 3676 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0a/e6/a7d828fef907843b2a5773ebff47fb79ac0c1c88d60c0ca9530ee941e248/win32_setctime-1.1.0-py3-none-any.whl", hash = "sha256:231db239e959c2fe7eb1d7dc129f11172354f98361c4fa2d6d2d7e278baa8aad", size = 3604 },
 ]
 
 [[package]]

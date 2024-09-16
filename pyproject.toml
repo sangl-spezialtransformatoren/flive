@@ -17,6 +17,7 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "tenacity>=9.0.0",
     "xxhash>=3.4.1",
+    "loguru>=0.7.2",
 ]
 
 [build-system]

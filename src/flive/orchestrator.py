@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import sys
 from contextvars import ContextVar
@@ -7,7 +6,6 @@ from contextvars import Token
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
-from datetime import timedelta
 from typing import TYPE_CHECKING
 from typing import Literal
 from typing import Optional
@@ -15,26 +13,15 @@ from typing import TextIO
 from typing import cast
 from uuid import UUID
 
-import xxhash
-from sqlalchemy import JSON as SQLAlchemyJson
-from sqlalchemy import DateTime
-from sqlalchemy import ForeignKey
-from sqlalchemy import String
-from sqlalchemy import UniqueConstraint
 from sqlalchemy import delete
-from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import select
 from sqlalchemy import update
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.orm import Mapped
-from sqlalchemy.orm import mapped_column
 from tenacity import RetryCallState
 from tenacity import retry as _tenacity_retry
 from tenacity import retry_if_exception_type
@@ -44,16 +31,20 @@ from uuid_utils import uuid7
 
 from flive.logging import FliveStreamer
 from flive.logging import MultiOutputStream
+from flive.models import FlowAssignmentModel
+from flive.models import FlowHistoryModel
+from flive.models import FlowLogs
+from flive.models import FlowModel
+from flive.models import OrchestratorModel
+from flive.models import SettingsModel
 from flive.serialize import SerializedParams
 from flive.types import JSON
 from flive.types import FlowState
-from flive.types import Hash
-from flive.types import NoCacheHit
+from flive.utils import dict_hash
 
 if TYPE_CHECKING:
     from flive.flow import Flow
 
-HEARTBEAT_PERIOD = 1
 
 # Context variable to store the active orchestrator
 _active_orchestrator: ContextVar[Optional["FliveOrchestrator"]] = ContextVar(
@@ -106,16 +97,6 @@ tenacity_acquire_retry = _tenacity_retry(
 )
 
 
-# Parameter hashing
-def dict_hash(params: SerializedParams) -> Hash:
-    # Convert parameters to a sorted, compact JSON string
-    json_string = json.dumps(
-        params, sort_keys=True, ensure_ascii=True, separators=(",", ":")
-    )
-    # Generate a hash of the JSON string
-    return xxhash.xxh3_64_hexdigest(json_string)
-
-
 # Return types
 @dataclass
 class FlowFailureInfo:
@@ -125,84 +106,9 @@ class FlowFailureInfo:
 
 @dataclass
 class AcquiredFlow:
-    key: str
     id: UUID
+    key: str
     parameters: SerializedParams
-
-
-# Database models
-class BaseModel(DeclarativeBase):
-    type_annotation_map = {
-        datetime: DateTime(timezone=True),
-        JSON: SQLAlchemyJson().with_variant(JSONB, "postgresql"),
-        Hash: String(16),
-        FlowState: String,
-    }
-
-
-class SettingsModel(BaseModel):
-    __tablename__ = "settings"
-
-    id: Mapped[int] = mapped_column(default=0, primary_key=True)
-    heartbeat_interval: Mapped[timedelta]
-    orchestrator_dead_after: Mapped[timedelta]
-
-
-class OrchestratorModel(BaseModel):
-    __tablename__ = "orchestrator"
-
-    id: Mapped[UUID] = mapped_column(primary_key=True)
-    last_seen_at: Mapped[datetime]
-
-
-class FlowModel(BaseModel):
-    __tablename__ = "flow"
-
-    # General data
-    id: Mapped[UUID] = mapped_column(primary_key=True)
-    key: Mapped[str]
-    state: Mapped[FlowState] = mapped_column(default=FlowState.WAITING)
-    parameters: Mapped[JSON]
-    parameter_hash: Mapped[Hash] = mapped_column(index=True)
-    result: Mapped[Optional[JSON]]
-    parent_flow_id: Mapped[Optional[UUID]] = mapped_column(
-        ForeignKey("flow.id"), index=True
-    )
-
-    # Retry handling
-    maximum_retries: Mapped[int] = mapped_column(default=0)
-    retries: Mapped[int] = mapped_column(default=0)
-
-
-class FlowAssignmentModel(BaseModel):
-    __tablename__ = "flow_assignment"
-
-    flow_id: Mapped[UUID] = mapped_column(ForeignKey("flow.id"), primary_key=True)
-    orchestrator_id: Mapped[UUID] = mapped_column(ForeignKey("orchestrator.id"))
-
-    __table_args__ = (
-        UniqueConstraint("flow_id", "orchestrator_id", name="uq_flow_assignment"),
-    )
-
-
-class FlowHistoryModel(BaseModel):
-    __tablename__ = "flow_history"
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid7)
-    flow_id: Mapped[UUID] = mapped_column(ForeignKey("flow.id"))
-    timestamp: Mapped[datetime] = mapped_column(default=lambda: datetime.now(tz=UTC))
-    from_state: Mapped[Optional[FlowState]]
-    to_state: Mapped[FlowState]
-
-
-class FlowLogs(BaseModel):
-    __tablename__ = "flow_logs"
-
-    id: Mapped[UUID] = mapped_column(primary_key=True)
-    kind: Mapped[Literal["stdout", "stderr"]]
-    flow_id: Mapped[UUID] = mapped_column(ForeignKey("flow.id"))
-    timestamp: Mapped[datetime] = mapped_column(default=lambda: datetime.now(tz=UTC))
-    message: Mapped[str]
 
 
 # Orchestrator implementation
@@ -274,7 +180,7 @@ class FliveOrchestrator(object):
     async def _run_flows(self):
         while True:
             try:
-                acquired_flow = await self.flow_acquire_one(list(self.flows.keys()))
+                acquired_flow = await self.acquire_next_flow(list(self.flows.keys()))
                 flow = self.flows[acquired_flow.key]
                 asyncio.create_task(
                     flow.execute_work_json(acquired_flow.id, acquired_flow.parameters)
@@ -308,6 +214,8 @@ class FliveOrchestrator(object):
                 await asyncio.sleep(1)
 
     async def initialize_instrumentation(self):
+        # TODO: Simplify setup/initialization
+
         await self.register()
         await self.cleanup()
 
@@ -325,9 +233,13 @@ class FliveOrchestrator(object):
         # Stream logs to the database
         self.stream_task = asyncio.create_task(self.log_streamer.work())
 
+        # Get heartbeat period from database
+        settings = await self.get_settings()
+        heartbeat_period = settings.heartbeat_interval.total_seconds()
+
         async def heartbeat():
             while True:
-                await asyncio.sleep(HEARTBEAT_PERIOD)
+                await asyncio.sleep(heartbeat_period)
                 await self.heartbeat()
 
         self.heartbeat_task = asyncio.create_task(heartbeat())
@@ -365,6 +277,9 @@ class FliveOrchestrator(object):
     async def heartbeat(self) -> None:
         # As long as the orchestrator is alive, we update the last_seen_at timestamp. When it dies, we can
         # identify it by the timestamp and let other orchestrators take over the assigned flows.
+
+        # TODO: Commit suicide if heartbeat fails
+
         async with self.session() as session:
             await session.execute(
                 update(OrchestratorModel)
@@ -374,7 +289,7 @@ class FliveOrchestrator(object):
             await session.commit()
 
     @tenacity_retry
-    async def flow_dispatch(
+    async def dispatch_flow(
         self,
         flow_id: UUID,
         key: str,
@@ -406,7 +321,7 @@ class FliveOrchestrator(object):
             await session.commit()
 
     @tenacity_retry
-    async def flow_dispatch_and_acquire(
+    async def dispatch_and_acquire_flow(
         self,
         flow_id: UUID,
         key: str,
@@ -440,7 +355,7 @@ class FliveOrchestrator(object):
             await session.commit()
 
     @tenacity_retry
-    async def flow_start_work(self, flow_id: UUID) -> None:
+    async def start_work_on_flow(self, flow_id: UUID) -> None:
         """
         Start working on a flow.
         """
@@ -480,7 +395,7 @@ class FliveOrchestrator(object):
             await session.commit()
 
     @tenacity_retry
-    async def flow_complete(self, flow_id: UUID, result: JSON) -> None:
+    async def complete_flow(self, flow_id: UUID, result: JSON) -> None:
         """
         Complete a flow.
         """
@@ -528,7 +443,7 @@ class FliveOrchestrator(object):
             await session.commit()
 
     @tenacity_retry
-    async def flow_fail(self, flow_id: UUID) -> FlowFailureInfo:
+    async def fail_flow(self, flow_id: UUID) -> FlowFailureInfo:
         """
         Fail a flow.
         """
@@ -596,9 +511,9 @@ class FliveOrchestrator(object):
 
         # Return the dataclass
         return failure_info
-
+    
     @tenacity_retry
-    async def flow_acquire(self, flow_id: UUID) -> None:
+    async def acquire_flow(self, flow_id: UUID) -> None:
         """
         Acquire a flow.
         """
@@ -624,7 +539,7 @@ class FliveOrchestrator(object):
             await session.commit()
 
     @tenacity_acquire_retry
-    async def flow_acquire_one(self, flow_keys: list[str]) -> AcquiredFlow:
+    async def acquire_next_flow(self, flow_keys: list[str]) -> AcquiredFlow:
         """
         Acquire the next flow to work on.
         """
@@ -646,7 +561,7 @@ class FliveOrchestrator(object):
                 raise NoResultFound()
 
             # Use the flow_acquire method to mark the flow as scheduled and create assignment
-            await self.flow_acquire(flow.id)
+            await self.acquire_flow(flow.id)
 
         return AcquiredFlow(
             key=flow.key,
@@ -655,8 +570,8 @@ class FliveOrchestrator(object):
         )
 
     @tenacity_retry
-    async def flow_get_cached_result(
-        self, flow_key: Hash, parent_flow_id: UUID, parameters: SerializedParams
+    async def get_cached_result_of_flow(
+        self, flow_key: str, parent_flow_id: UUID, parameters: SerializedParams
     ) -> JSON:
         """
         Get the cached result of a flow.
@@ -676,11 +591,54 @@ class FliveOrchestrator(object):
 
         # Return the result or raise a NoCacheHit exception
         async with self.session() as session:
-            try:
-                flow = (await session.execute(stmt)).scalars().one()
-                return flow.result
-            except NoResultFound:
-                raise NoCacheHit()
+            flow = (await session.execute(stmt)).scalars().one()
+            return flow.result
+
+    @tenacity_retry
+    async def recover_orphaned_flow(
+        self, flow_key: str, parent_flow_id: UUID, parameters: SerializedParams
+    ) -> AcquiredFlow:
+        """
+        Recover an orphaned child flow.
+        """
+        parameter_hash = dict_hash(parameters)
+        stmt = (
+            select(FlowModel)
+            .where(
+                FlowModel.key == flow_key,
+                FlowModel.parent_flow_id == parent_flow_id,
+                FlowModel.parameter_hash == parameter_hash,
+                FlowModel.state == FlowState.ORPHANED,
+            )
+            .limit(1)
+        )
+
+        async with self.session() as session:
+            flow = (await session.execute(stmt)).scalars().one()
+
+            # Lock the flow by updating its state to SCHEDULED
+            flow.state = FlowState.SCHEDULED
+            event = FlowHistoryModel(
+                flow_id=flow.id,
+                from_state=FlowState.ORPHANED,
+                to_state=FlowState.SCHEDULED,
+            )
+            session.add(event)
+
+            # Create a new flow assignment
+            assignment = FlowAssignmentModel(
+                flow_id=flow.id,
+                orchestrator_id=self.id,
+            )
+            session.add(assignment)
+
+            await session.commit()
+
+            return AcquiredFlow(
+                key=flow.key,
+                id=flow.id,
+                parameters=cast(SerializedParams, flow.parameters),
+            )
 
     @tenacity_retry
     async def maintenance(self) -> None:
@@ -691,7 +649,7 @@ class FliveOrchestrator(object):
             settings = await self.get_settings()
 
             # Find flows with lost orchestrators
-            lost_flows = (
+            lost_flows_query = (
                 select(FlowModel)
                 .join(FlowAssignmentModel, FlowAssignmentModel.flow_id == FlowModel.id)
                 .join(
@@ -701,12 +659,13 @@ class FliveOrchestrator(object):
                 .where(
                     FlowModel.state.in_((FlowState.RUNNING, FlowState.SCHEDULED)),
                     OrchestratorModel.last_seen_at
-                    < func.now() - settings.orchestrator_dead_after,
+                    < datetime.now(UTC) - settings.orchestrator_dead_after,
                 )
             )
+            lost_flows = (await session.execute(lost_flows_query)).scalars().all()
 
             # Update lost flows to ORCHESTRATOR_LOST state
-            for flow in (await session.execute(lost_flows)).scalars():
+            for flow in lost_flows:
                 old_state = flow.state
                 flow.state = FlowState.ORCHESTRATOR_LOST
                 event = FlowHistoryModel(
@@ -780,7 +739,7 @@ class FliveOrchestrator(object):
                 .select_from(OrchestratorModel)
                 .where(
                     OrchestratorModel.last_seen_at
-                    < func.now() - settings.orchestrator_dead_after,
+                    < datetime.now(UTC) - settings.orchestrator_dead_after,
                     ~select(FlowAssignmentModel)
                     .where(FlowAssignmentModel.orchestrator_id == OrchestratorModel.id)
                     .exists(),

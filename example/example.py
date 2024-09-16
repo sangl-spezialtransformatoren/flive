@@ -1,18 +1,25 @@
 import asyncio
 import os
 import random
+import sys
 from datetime import timedelta
 
 from aiorun import run
+from loguru import logger
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from flive import FliveOrchestrator
 from flive import flow
-from flive.orchestrator import BaseModel
-from flive.orchestrator import SettingsModel
+from flive.models import BaseModel
+from flive.models import SettingsModel
 
 connection_string = "sqlite+aiosqlite:///flive.db"
+
+# Configure loguru to log debug messages to stdout
+logger.remove()  # Remove default handler
+logger.configure(extra={"flow_id": " "*8}) 
+logger.add(sys.stdout, level="DEBUG", format="{time} | {level} | {extra[flow_id]} | {message}")
 
 
 async def setup_database():
@@ -26,10 +33,11 @@ async def setup_database():
         await conn.execute(
             insert(SettingsModel).values(
                 id=0,
-                heartbeat_interval=timedelta(seconds=30),
-                orchestrator_dead_after=timedelta(minutes=3),
+                heartbeat_interval=timedelta(seconds=5),
+                orchestrator_dead_after=timedelta(seconds=30),
             )
         )
+
 
 
 @flow(key="simple_task", retries=3)
@@ -42,16 +50,14 @@ async def simple_task(name: str) -> str:
 
 @flow(key="main_flow")
 async def main_flow():
-    try:
-        result = await simple_task("World")
-        print("!", result)
-    except Exception as e:
-        print(f"Main flow caught an exception: {e}")
+    result = await simple_task("World")
+    print("!", result)
 
 
 async def run_flow():
     orchestrator = FliveOrchestrator(connection_string)
-    await orchestrator.run()
+    async with orchestrator:
+        await main_flow()
 
 
 if __name__ == "__main__":
